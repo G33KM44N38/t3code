@@ -1354,6 +1354,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   isRunning: boolean;
   canInterrupt: boolean;
   followUpBehavior: "queue" | "steer";
+  canSteer: boolean;
   alternateShortcutLabel: string | null;
   showPlanFollowUpPrompt: boolean;
   promptHasText: boolean;
@@ -1397,6 +1398,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         isRunning={props.isRunning}
         canInterrupt={props.canInterrupt}
         followUpBehavior={props.followUpBehavior}
+        canSteer={props.canSteer}
         alternateShortcutLabel={props.alternateShortcutLabel}
         showPlanFollowUpPrompt={props.showPlanFollowUpPrompt}
         promptHasText={props.promptHasText}
@@ -1752,8 +1754,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     editingQueuedAttachments,
     onRemoveEditingQueuedAttachment,
   } = props;
-  // A compacting turn cannot take steering input, so follow-ups queue meanwhile.
-  const followUpBehavior = isCompacting ? "queue" : settings.followUpBehavior;
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const composerDraftTargetKey = composerTargetKey(composerDraftTarget);
   const {
@@ -4026,7 +4026,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             resolveComposerDispatchMode({
               running: phase === "running",
               alternateModifier: false,
-              activeTurnDefault: followUpBehavior,
+              activeTurnDefault: settings.followUpBehavior,
+              canSteer: !isCompacting,
             }),
           submissionIntent,
         );
@@ -4048,7 +4049,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       resolveComposerDispatchMode({
         running: phase === "running",
         alternateModifier: event.metaKey || event.ctrlKey,
-        activeTurnDefault: followUpBehavior,
+        activeTurnDefault: settings.followUpBehavior,
+        canSteer: !isCompacting,
       }),
     );
   };
@@ -4059,7 +4061,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       resolveComposerDispatchMode({
         running: phase === "running",
         alternateModifier: false,
-        activeTurnDefault: followUpBehavior,
+        activeTurnDefault: settings.followUpBehavior,
+        canSteer: !isCompacting,
       }),
     );
   };
@@ -4219,7 +4222,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         resolveComposerDispatchMode({
           running: phase === "running",
           alternateModifier: submissionIntent === "alternate",
-          activeTurnDefault: followUpBehavior,
+          activeTurnDefault: settings.followUpBehavior,
+          canSteer: !isCompacting,
         }),
         submissionIntent,
       );
@@ -7285,7 +7289,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     pendingAction={pendingPrimaryAction}
                     isRunning={phase === "running"}
                     canInterrupt={canInterrupt}
-                    followUpBehavior={followUpBehavior}
+                    followUpBehavior={settings.followUpBehavior}
+                    canSteer={!isCompacting}
                     alternateShortcutLabel={shortcutLabelForCommand(
                       keybindings,
                       "composer.sendAlternate",
