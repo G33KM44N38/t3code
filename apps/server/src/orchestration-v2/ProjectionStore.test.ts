@@ -5211,7 +5211,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
     }),
   );
 
-  it.effect("a pull request watch keeps a finished thread working until it ends", () =>
+  it.effect("a finished thread completes immediately while its pull request watch stays armed", () =>
     Effect.gen(function* () {
       const store = yield* ProjectionStore.ProjectionStoreV2;
       const threadId = ThreadId.make("thread:watched-pull-request");
@@ -5318,14 +5318,10 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           },
         },
       ]);
-      assert.deepEqual((yield* store.getThreadShell(threadId))?.pendingBackgroundTasks, [
-        {
-          taskId: "pull-request-watch:github.com/pingdotgg/t3code#7",
-          description: "Watching pull request #7",
-          kind: "monitor",
-        },
-      ]);
-      assert.equal(yield* phase, "running");
+      assert.equal(yield* phase, "completed");
+      const watched = yield* store.getThreadShell(threadId);
+      assert.deepEqual(watched?.pendingBackgroundTasks, []);
+      assert.equal(watched?.pullRequests?.[0]?.watch?.startedAt, DateTime.formatIso(at));
 
       yield* syncPullRequests("unwatched", [link]);
       assert.deepEqual((yield* store.getThreadShell(threadId))?.pendingBackgroundTasks, []);
