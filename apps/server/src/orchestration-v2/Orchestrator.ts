@@ -2383,28 +2383,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: "The pull request watch ended or its thread settled while it was read.",
         });
       }
-      if (command.idleBefore !== undefined) {
-        const shell = yield* projectionStore
-          .getThreadShell(command.threadId)
-          .pipe(
-            Effect.mapError(
-              (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
-            ),
-          );
-        if (
-          shell === null ||
-          shell.activeRunId !== null ||
-          shell.activityRunStatus != null ||
-          Date.parse(link.watch.lastProgressAt ?? link.watch.startedAt) >
-            Date.parse(command.idleBefore)
-        ) {
-          return yield* new OrchestratorDispatchError({
-            commandId: command.commandId,
-            commandType: command.type,
-            cause: "The pull request watch made progress or its agent resumed before expiry.",
-          });
-        }
-      }
       yield* dispatchThreadMutation(command, events, effects);
       if (command.wake === undefined) return;
       yield* dispatchMessage(

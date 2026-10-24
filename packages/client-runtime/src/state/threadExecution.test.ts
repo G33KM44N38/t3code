@@ -54,6 +54,48 @@ function run(id: string, ordinal: number, status: OrchestrationV2RunStatus) {
 }
 
 describe("thread execution presentation", () => {
+  it("a passive PR watch does not change completed or active work on any client", () => {
+    const thread = {
+      ...v2Projection.thread,
+      pullRequests: [
+        {
+          host: "github.com",
+          repository: "acme/app",
+          number: 1,
+          url: "https://github.com/acme/app/pull/1",
+          source: "agent" as const,
+          linkedAt: "2026-07-28T10:00:00.000Z",
+          snapshot: null,
+          stack: null,
+          watch: {
+            startedAt: "2026-07-28T10:00:00.000Z",
+            headSha: null,
+            failedChecks: [],
+            passed: false,
+            passedChecks: [],
+            remarksThrough: "2026-07-28T10:00:00.000Z",
+            remarkIds: [],
+            conflicting: false,
+            wakes: 0,
+          },
+        },
+      ],
+    };
+    expect(deriveThreadRuntime({ ...v2Projection, thread })).toBeNull();
+    expect(
+      deriveThreadRuntime({ ...v2Projection, thread, runs: [run("done", 1, "completed")] }),
+    ).toMatchObject({
+      status: "completed",
+      activeRunId: null,
+    });
+    expect(
+      deriveThreadRuntime({ ...v2Projection, thread, runs: [run("wake", 2, "running")] }),
+    ).toMatchObject({
+      status: "running",
+      activeRunId: "wake",
+    });
+  });
+
   it("derives the current root failure without inheriting errors from children or previous runs", () => {
     const failed = { ...run("limited", 1, "failed"), rootNodeId: NodeId.make("root") };
     const item = {

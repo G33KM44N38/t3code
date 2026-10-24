@@ -3173,8 +3173,6 @@ const OrchestrationV2InternalCommand = Schema.Union([
     startedAt: IsoDateTime,
     /** The watch to record, or null to end it. */
     watch: Schema.NullOr(ThreadPullRequestWatch),
-    /** End only if still idle and no progress was observed after this cutoff. */
-    idleBefore: Schema.optional(IsoDateTime),
     wake: Schema.optional(
       Schema.Struct({
         messageId: MessageId,

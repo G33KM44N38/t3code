@@ -101,10 +101,6 @@ export type ThreadPullRequestKey = typeof ThreadPullRequestKey.Type;
  */
 export const ThreadPullRequestWatch = Schema.Struct({
   startedAt: IsoDateTime,
-  /** Last observed progress; old watches use startedAt. Quiet watches expire after an hour. */
-  lastProgressAt: Schema.optional(IsoDateTime),
-  /** Check states from the last read, including jobs still in flight. */
-  checksFingerprint: Schema.optional(Schema.String),
   /** Head commit at the last pass; null where the host does not report one. */
   headSha: Schema.NullOr(TrimmedNonEmptyString),
   /** Failed checks on that commit the agent was told about; a rerun that fails again is news. */

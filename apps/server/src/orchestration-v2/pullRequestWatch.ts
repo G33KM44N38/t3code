@@ -111,21 +111,8 @@ export function evaluatePullRequestWatch(
   return {
     changes,
     next: {
-      ...watch,
       startedAt: watch.startedAt,
       headSha,
-      checksFingerprint:
-        detail.checks.length > 0
-          ? JSON.stringify(
-              detail.checks
-                .map((check) => [check.name, check.status, check.required ?? false])
-                .toSorted((left, right) =>
-                  JSON.stringify(left).localeCompare(JSON.stringify(right)),
-                ),
-            )
-          : headMoved
-            ? undefined
-            : watch.checksFingerprint,
       failedChecks,
       passed,
       passedChecks,
@@ -211,7 +198,7 @@ export function pullRequestWatchMessage(input: {
     "",
     exhausted
       ? `T3 Code stopped watching after ${PULL_REQUEST_WATCH_WAKE_LIMIT} comment-only updates in a row. Call watch_pull_request to watch it again.`
-      : "Look into each item and act on it as your task requires. T3 Code keeps watching and wakes you on the next change, so end your turn when you are done. When you hand the work back to the user, call unwatch_pull_request first so the thread returns to their inbox.",
+      : "Look into each item and act on it as your task requires. T3 Code keeps watching and wakes you on the next change, so end your turn when you are done. The thread returns to the inbox between runs. Call unwatch_pull_request when no further automatic follow-up is needed.",
   ].join("\n");
   const failed = changes.some(
     (change) => change.kind === "checks-failed" || change.kind === "conflicting",
