@@ -2525,6 +2525,258 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("expires an idle PR watch across reactor restarts without waking the agent", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threadId = ThreadId.make("runtime-pr-watch-idle-expiry");
+      const projectId = ProjectId.make("pr-watch-idle-expiry-project");
+      yield* seedProject({
+        projectId,
+        title: "Idle watch",
+        workspaceRoot: "/workspace/idle-watch",
+        defaultModelSelection: null,
+        createdAt: "2026-10-01T00:00:00.000Z",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("idle-watch-create"),
+        threadId,
+        projectId,
+        title: "Idle watch",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+      });
+      const start = (id: string) =>
+        orchestrator.dispatch({
+          type: "thread.pull-request.watch",
+          commandId: CommandId.make(id),
+          threadId,
+          host: "github.com",
+          repository: "pingdotgg/t3code",
+          number: 12,
+          watching: true,
+          link: { url: "https://github.com/pingdotgg/t3code/pull/12", source: "agent" },
+        });
+      yield* start("idle-watch-start");
+      assert.deepEqual((yield* orchestrator.getThreadShell(threadId))?.pendingBackgroundTasks, [
+        {
+          taskId: "pull-request-watch:github.com/pingdotgg/t3code#12",
+          description: "Watching pull request #12",
+          kind: "monitor",
+        },
+      ]);
+      let headSha = "abc1234def";
+      let rateLimited = false;
+      let completedChecks = 0;
+      let activityReads = 0;
+      let failing = false;
+      let reversed = false;
+      const host = Layer.mock(PullRequestService.PullRequestService)({
+        watchFingerprint: () =>
+          rateLimited
+            ? Effect.fail(
+                new PullRequestOperationError({
+                  operation: "getChangeRequest",
+                  detail: "paused",
+                  cause: new PullRequestProviderError({
+                    provider: SourceControlProviderKind.make("github"),
+                    operation: "getChangeRequest",
+                    reason: "rate-limited",
+                    detail: "paused",
+                  }),
+                }),
+              )
+            : Effect.succeed({ status: "OPEN pending", remarks: "0" }),
+        invalidate: () => Effect.void,
+        detail: () =>
+          Effect.succeed({
+            ...watchedPullRequestDetail({ projectId, number: 12, at: "2026-10-02T12:00:00.000Z" }),
+            headSha,
+            checks: Array.from({ length: 4 }, (_, position) => {
+              const index = reversed ? 3 - position : position;
+              return {
+                name: `check-${index}`,
+                status:
+                  failing && index < 2
+                    ? ("failure" as const)
+                    : index < completedChecks
+                      ? ("success" as const)
+                      : ("pending" as const),
+                description: null,
+                url: null,
+              };
+            }),
+          }),
+        activity: () =>
+          Effect.sync(() => {
+            activityReads += 1;
+            return {
+              comments: [],
+              commentCount: 0,
+              commentsTruncated: false,
+              reviewThreads: [],
+              commits: [],
+            };
+          }),
+      });
+      const makeReactor = PullRequestWatchReactor.make.pipe(
+        Effect.provide(Layer.mergeAll(NodeServices.layer, host)),
+      );
+      const first = yield* makeReactor;
+      yield* first.sweep;
+      yield* TestClock.adjust("59 minutes");
+      const restarted = yield* makeReactor;
+      yield* restarted.sweep;
+      assert.equal(
+        (yield* orchestrator.getThreadShell(threadId))?.pullRequests?.[0]?.watch?.headSha,
+        "abc1234def",
+      );
+
+      yield* TestClock.adjust("1 minute");
+      yield* restarted.sweep;
+      yield* restarted.sweep;
+      // Expiry forces a final full read, even though activity was read just a minute ago.
+      assert.equal(activityReads, 3);
+      const expired = yield* orchestrator.getThreadShell(threadId);
+      assert.isUndefined(expired?.pullRequests?.[0]?.watch);
+      assert.equal(expired?.pullRequests?.[0]?.number, 12);
+      assert.equal(expired?.activeRunId, null);
+      assert.deepEqual(expired?.pendingBackgroundTasks, []);
+      const records = yield* orchestrator.getThreadRecords(threadId, ["runs", "messages"]);
+      assert.deepEqual(
+        { runs: records.runs.length, messages: records.messages.length },
+        { runs: 0, messages: 0 },
+      );
+
+      yield* start("idle-watch-restart");
+      yield* restarted.sweep;
+      assert.equal(
+        (yield* orchestrator.getThreadShell(threadId))?.pullRequests?.[0]?.watch?.headSha,
+        "abc1234def",
+      );
+      yield* TestClock.adjust("59 minutes");
+      headSha = "new-commit";
+      yield* TestClock.adjust("1 minute");
+      yield* restarted.sweep;
+      assert.equal(
+        (yield* orchestrator.getThreadShell(threadId))?.pullRequests?.[0]?.watch?.headSha,
+        "new-commit",
+      );
+
+      // Individual jobs count as progress even before the full gate passes.
+      yield* TestClock.adjust("40 minutes");
+      completedChecks = 1;
+      yield* restarted.sweep;
+      const progressed = (yield* orchestrator.getThreadShell(threadId))?.pullRequests?.[0]?.watch;
+      assert.equal(progressed?.passed, false);
+      assert.equal(
+        progressed?.checksFingerprint,
+        '[["check-0","success",false],["check-1","pending",false],["check-2","pending",false],["check-3","pending",false]]',
+      );
+      yield* TestClock.adjust("40 minutes");
+      completedChecks = 2;
+      yield* restarted.sweep;
+      assert.equal(
+        (yield* orchestrator.getThreadShell(threadId))?.pullRequests?.[0]?.watch?.passed,
+        false,
+      );
+
+      rateLimited = true;
+      yield* TestClock.adjust("59 minutes");
+      const again = yield* makeReactor;
+      yield* again.sweep;
+      assert.equal(
+        (yield* orchestrator.getThreadShell(threadId))?.pullRequests?.[0]?.watch?.headSha,
+        "new-commit",
+      );
+      yield* TestClock.adjust("1 minute");
+      yield* again.sweep;
+      assert.isUndefined((yield* orchestrator.getThreadShell(threadId))?.pullRequests?.[0]?.watch);
+
+      // A watch without a successful read has no progress timestamp, as with legacy state.
+      yield* start("idle-watch-legacy-start");
+      yield* TestClock.adjust("59 minutes");
+      yield* again.sweep;
+      const legacy = (yield* orchestrator.getThreadShell(threadId))?.pullRequests?.[0]?.watch;
+      assert.equal(legacy?.headSha, null);
+      assert.isUndefined(legacy?.lastProgressAt);
+      yield* TestClock.adjust("1 minute");
+      yield* again.sweep;
+      assert.isUndefined((yield* orchestrator.getThreadShell(threadId))?.pullRequests?.[0]?.watch);
+
+      yield* start("idle-watch-reordered-start");
+      const beforeReorder = (yield* orchestrator.getThreadShell(threadId))!.pullRequests![0]!
+        .watch!;
+      yield* orchestrator.dispatch({
+        type: "thread.pull-request-watch.sync",
+        commandId: CommandId.make("idle-watch-reordered-seed"),
+        threadId,
+        host: "github.com",
+        repository: "pingdotgg/t3code",
+        number: 12,
+        startedAt: beforeReorder.startedAt,
+        watch: { ...beforeReorder, headSha, failedChecks: ["check-0", "check-1"] },
+      });
+      rateLimited = false;
+      failing = true;
+      completedChecks = 0;
+      yield* again.sweep;
+      yield* TestClock.adjust("1 hour");
+      reversed = true;
+      yield* again.sweep;
+      assert.isUndefined((yield* orchestrator.getThreadShell(threadId))?.pullRequests?.[0]?.watch);
+
+      rateLimited = true;
+      yield* start("idle-watch-active-start");
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("idle-watch-active-message"),
+        threadId,
+        messageId: MessageId.make("idle-watch-active-message"),
+        text: "Continue the work.",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+      });
+      const active = yield* orchestrator.getThreadShell(threadId);
+      assert.isNotNull(active?.activeRunId);
+      yield* TestClock.adjust("1 hour");
+      yield* again.sweep;
+      const stillActive = yield* orchestrator.getThreadShell(threadId);
+      assert.equal(stillActive?.activeRunId, active?.activeRunId);
+      assert.equal(stillActive?.pullRequests?.[0]?.watch?.headSha, null);
+      const expireActive = yield* orchestrator
+        .dispatch({
+          type: "thread.pull-request-watch.sync",
+          commandId: CommandId.make("idle-watch-active-expire"),
+          threadId,
+          host: "github.com",
+          repository: "pingdotgg/t3code",
+          number: 12,
+          startedAt: stillActive!.pullRequests![0]!.watch!.startedAt,
+          watch: null,
+          idleBefore: stillActive!.pullRequests![0]!.watch!.startedAt,
+        })
+        .pipe(Effect.exit);
+      assert.equal(expireActive._tag, "Failure");
+      assert.equal(
+        (yield* orchestrator.getThreadShell(threadId))?.pullRequests?.[0]?.watch?.headSha,
+        null,
+      );
+      yield* orchestrator.dispatch({
+        type: "thread.stop",
+        commandId: CommandId.make("idle-watch-active-stop"),
+        threadId,
+      });
+    }),
+  );
+
   it.effect(
     "reads a watched pull request once a pass, waits out rate limits, and skips quiet passes",
     () =>
@@ -2758,7 +3010,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         {
           threadId,
           pullRequest: "github.com/pingdotgg/t3code#11",
-          reason: "stopped",
+          reason: "idle-timeout",
           minutes: 480,
           quietMinutes: 120,
           longestQuietMinutes: 360,
