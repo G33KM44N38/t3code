@@ -18,6 +18,7 @@ import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -43,6 +44,8 @@ import { evaluatePullRequestWatch, pullRequestWatchMessage } from "./pullRequest
 const SWEEP_MINUTES = 2;
 /** Reads in a row that failed for a reason other than a rate limit before the watch ends. */
 const READ_FAILURE_LIMIT = 8;
+/** Successful reads alone must not keep a blocked thread in Working forever. */
+const QUIET_WATCH_MS = 60 * 60_000;
 /**
  * Without a host fingerprint, a pull request with nothing in flight is read again only when its
  * sync snapshot moves, or after this long, for news the snapshot cannot show, such as a bot
@@ -124,6 +127,7 @@ type WatchEndReason =
   | "comment-limit"
   | "settled"
   | "subagent"
+  | "idle-timeout"
   | "stopped";
 
 /**
@@ -178,7 +182,14 @@ function planRead(
   now: number,
 ): ReadPlan {
   // A watch takes its first look with everything.
-  if (last === undefined || group.targets.some((target) => !last.watches.has(watchKey(target)))) {
+  if (
+    last === undefined ||
+    group.targets.some(
+      (target) =>
+        !last.watches.has(watchKey(target)) ||
+        now - Date.parse(target.watch.lastProgressAt ?? target.watch.startedAt) >= QUIET_WATCH_MS,
+    )
+  ) {
     return { detail: true, activity: true };
   }
   if (fingerprint === null) {
@@ -196,15 +207,20 @@ function planRead(
   return { detail: activity || last.status !== fingerprint.status || last.inFlight, activity };
 }
 
+const sameItems = (left: ReadonlyArray<string>, right: ReadonlyArray<string>) =>
+  JSON.stringify(left.toSorted()) === JSON.stringify(right.toSorted());
+
 function watchesEqual(left: ThreadPullRequestWatch, right: ThreadPullRequestWatch): boolean {
   return (
     left.startedAt === right.startedAt &&
+    left.lastProgressAt === right.lastProgressAt &&
+    left.checksFingerprint === right.checksFingerprint &&
     left.headSha === right.headSha &&
-    left.failedChecks.join("\n") === right.failedChecks.join("\n") &&
+    sameItems(left.failedChecks, right.failedChecks) &&
     left.passed === right.passed &&
-    left.passedChecks.join("\n") === right.passedChecks.join("\n") &&
+    sameItems(left.passedChecks, right.passedChecks) &&
     left.remarksThrough === right.remarksThrough &&
-    left.remarkIds.join("\n") === right.remarkIds.join("\n") &&
+    sameItems(left.remarkIds, right.remarkIds) &&
     left.conflicting === right.conflicting &&
     left.wakes === right.wakes
   );
@@ -307,6 +323,7 @@ export const make = Effect.gen(function* () {
     target: WatchTarget,
     next: ThreadPullRequestWatch | null,
     wake?: { readonly text: string; readonly notification: OrchestrationV2Notification },
+    idleBefore?: string,
   ) =>
     Effect.gen(function* () {
       const uuid = yield* crypto.randomUUIDv4;
@@ -317,6 +334,7 @@ export const make = Effect.gen(function* () {
         ...identityOf(target.link),
         startedAt: target.watch.startedAt,
         watch: next,
+        ...(idleBefore === undefined ? {} : { idleBefore }),
         ...(wake === undefined
           ? {}
           : { wake: { ...wake, messageId: MessageId.make(`message:pr-watch:${uuid}`) } }),
@@ -549,10 +567,14 @@ export const make = Effect.gen(function* () {
     });
     yield* eachTarget(group, (target) => {
       const report = evaluatePullRequestWatch(target.watch, detail, remarks);
+      const progressed = !watchesEqual(report.next, target.watch);
+      const next = progressed
+        ? { ...report.next, lastProgressAt: DateTime.formatIso(DateTime.makeUnsafe(now)) }
+        : report.next;
       if (report.changes.length > 0) {
         return record(
           target,
-          report.exhausted ? null : report.next,
+          report.exhausted ? null : next,
           pullRequestWatchMessage({
             number: target.link.number,
             url: target.link.url,
@@ -565,7 +587,7 @@ export const make = Effect.gen(function* () {
           Effect.tap(() => (report.exhausted ? ended(target, "comment-limit") : Effect.void)),
         );
       }
-      return watchesEqual(report.next, target.watch) ? Effect.void : record(target, report.next);
+      return progressed ? record(target, next) : Effect.void;
     });
   });
 
@@ -635,6 +657,47 @@ export const make = Effect.gen(function* () {
             );
       },
       { concurrency: 4, discard: true },
+    );
+    const now = yield* Clock.currentTimeMillis;
+    yield* Effect.forEach(
+      targets.filter(
+        ({ watch }) => now - Date.parse(watch.lastProgressAt ?? watch.startedAt) >= QUIET_WATCH_MS,
+      ),
+      (target) =>
+        Effect.gen(function* () {
+          const shell = yield* engine.getThreadShell(target.thread.id);
+          // A final host read can have found progress. Never expire that update or an active run.
+          if (shell === null || shell.activeRunId !== null || shell.activityRunStatus != null)
+            return;
+          const link = shell.pullRequests?.find(
+            (link) => threadPullRequestKeyOf(link) === threadPullRequestKeyOf(target.link),
+          );
+          const watch = link?.watch;
+          if (
+            link === undefined ||
+            watch === undefined ||
+            watch.startedAt !== target.watch.startedAt ||
+            now - Date.parse(watch.lastProgressAt ?? watch.startedAt) < QUIET_WATCH_MS
+          )
+            return;
+          const current = { ...target, link, watch };
+          // No wake: another agent run could simply re-arm the same stalled watch.
+          yield* record(
+            current,
+            null,
+            undefined,
+            DateTime.formatIso(DateTime.makeUnsafe(now - QUIET_WATCH_MS)),
+          );
+          yield* ended(current, "idle-timeout");
+        }).pipe(
+          Effect.catchCause(
+            logFailure("pull request watch expiry failed", {
+              threadId: target.thread.id,
+              pullRequest: threadPullRequestKeyOf(target.link),
+            }),
+          ),
+        ),
+      { discard: true },
     );
   }).pipe(
     Effect.catchCause(logFailure("pull request watch sweep failed", {})),

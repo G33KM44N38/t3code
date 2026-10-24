@@ -111,8 +111,21 @@ export function evaluatePullRequestWatch(
   return {
     changes,
     next: {
+      ...watch,
       startedAt: watch.startedAt,
       headSha,
+      checksFingerprint:
+        detail.checks.length > 0
+          ? JSON.stringify(
+              detail.checks
+                .map((check) => [check.name, check.status, check.required ?? false])
+                .toSorted((left, right) =>
+                  JSON.stringify(left).localeCompare(JSON.stringify(right)),
+                ),
+            )
+          : headMoved
+            ? undefined
+            : watch.checksFingerprint,
       failedChecks,
       passed,
       passedChecks,
